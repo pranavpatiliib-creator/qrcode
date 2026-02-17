@@ -1,6 +1,8 @@
 /**
  * Request validation middleware for barcode scan payloads.
  */
+const { env } = require("../config/env");
+
 function validateScanBody(req, res, next) {
   const { id, source } = req.body || {};
 
@@ -13,11 +15,31 @@ function validateScanBody(req, res, next) {
 
   const normalizedId = id.trim();
 
-  // Adjust the regex based on your college ID format.
-  if (!/^[A-Za-z0-9_-]{4,40}$/.test(normalizedId)) {
+  if (!normalizedId) {
+    return res.status(400).json({
+      status: "error",
+      message: "Invalid id: empty value"
+    });
+  }
+
+  if (normalizedId.length > 120) {
+    return res.status(400).json({
+      status: "error",
+      message: "Invalid id: too long"
+    });
+  }
+
+  if (env.STUDENT_ID_REGEX && !env.STUDENT_ID_REGEX.test(normalizedId)) {
     return res.status(400).json({
       status: "error",
       message: "Invalid id format"
+    });
+  }
+
+  if (env.ALLOWED_STUDENT_IDS.size > 0 && !env.ALLOWED_STUDENT_IDS.has(normalizedId)) {
+    return res.status(400).json({
+      status: "error",
+      message: "Invalid id: not registered"
     });
   }
 
