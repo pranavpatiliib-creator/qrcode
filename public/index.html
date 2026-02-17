@@ -187,10 +187,6 @@
         <div class="cross">&#10007;</div>
       </div>
       <div id="reader"></div>
-      <div class="controls">
-        <button id="startBtn" type="button">Start Camera Scan</button>
-        <button id="stopBtn" type="button">Stop Camera</button>
-      </div>
 
       <p class="small">Camera fallback: manually type barcode/ID below if camera is unavailable.</p>
       <div class="controls">
@@ -222,8 +218,6 @@
       const successCountEl = document.getElementById("successCount");
       const successFlashEl = document.getElementById("successFlash");
       const failFlashEl = document.getElementById("failFlash");
-      const startBtn = document.getElementById("startBtn");
-      const stopBtn = document.getElementById("stopBtn");
       const manualIdEl = document.getElementById("manualId");
       const manualSubmitBtn = document.getElementById("manualSubmit");
 
@@ -656,25 +650,6 @@
         }
       }
 
-      async function stopScanner() {
-        if (!scanner || !active) return;
-
-        try {
-          await scanner.stop();
-          await scanner.clear();
-        } catch (err) {
-          console.error("Scanner stop failed:", err);
-        }
-        active = false;
-        setStatus("camera stopped", "");
-      }
-
-      startBtn.addEventListener("click", async () => {
-        await primeAudioContext();
-        await startScanner();
-      });
-      stopBtn.addEventListener("click", stopScanner);
-
       manualSubmitBtn.addEventListener("click", async () => {
         const id = manualIdEl.value.trim();
         if (!id) {
@@ -686,7 +661,15 @@
       });
 
       window.addEventListener("online", syncOfflineQueue);
+      window.addEventListener(
+        "pointerdown",
+        () => {
+          void primeAudioContext();
+        },
+        { once: true }
+      );
       window.addEventListener("load", async () => {
+        await primeAudioContext();
         await syncOfflineQueue();
         await startScanner();
       });
