@@ -50,12 +50,6 @@
         background: #000;
       }
 
-      #reader video {
-        width: 100% !important;
-        height: 100% !important;
-        object-fit: cover;
-      }
-
       .controls {
         display: grid;
         grid-template-columns: 1fr 1fr;
@@ -104,10 +98,6 @@
       }
 
       @media (max-width: 480px) {
-        #reader {
-          min-height: 320px;
-        }
-
         .controls {
           grid-template-columns: 1fr;
         }
@@ -191,58 +181,24 @@
         return (match || cameras[0]).id;
       }
 
-      function isMobileDevice() {
-        return window.matchMedia("(max-width: 768px)").matches || navigator.maxTouchPoints > 1;
-      }
-
-      function ensureInlineVideoPlayback() {
-        const video = document.querySelector("#reader video");
-        if (!video) return;
-        video.setAttribute("playsinline", "true");
-        video.setAttribute("muted", "true");
-        video.playsInline = true;
-        video.muted = true;
-      }
-
-      function buildCameraOptions(cameras) {
-        const options = [];
-        const preferredCameraId = pickBestCameraId(cameras);
-
-        if (preferredCameraId) {
-          options.push(preferredCameraId);
-        }
-
-        options.push({ facingMode: { ideal: "environment" } });
-        options.push({ facingMode: "environment" });
-        options.push({ facingMode: { ideal: "user" } });
-        options.push({ facingMode: "user" });
-
-        return options;
-      }
-
       function getScannerConfig() {
         const config = {
-          fps: isMobileDevice() ? 12 : 15,
+          fps: 15,
+          // Adaptive scan box improves 1D barcode reads across small/large screens.
+          qrbox: (viewfinderWidth, viewfinderHeight) => {
+            const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
+            const targetWidth = Math.max(160, Math.floor(minEdge * 0.9));
+            const width = Math.min(targetWidth, Math.max(120, viewfinderWidth - 16));
+            return {
+              width,
+              height: Math.max(90, Math.floor(width * 0.45))
+            };
+          },
           rememberLastUsedCamera: true,
           formatsToSupport: getBarcodeFormats(),
           experimentalFeatures: {
             useBarCodeDetectorIfSupported: true
           }
-        };
-
-        config.qrbox = (viewfinderWidth, viewfinderHeight) => {
-          const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
-          if (isMobileDevice()) {
-            const edge = Math.max(180, Math.floor(minEdge * 0.78));
-            return { width: edge, height: edge };
-          }
-
-          const targetWidth = Math.max(180, Math.floor(minEdge * 0.9));
-          const width = Math.min(targetWidth, Math.max(140, viewfinderWidth - 16));
-          return {
-            width,
-            height: Math.max(110, Math.floor(width * 0.62))
-          };
         };
 
         if (typeof Html5QrcodeScanType !== "undefined") {
@@ -342,27 +298,22 @@
           return;
         }
 
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          setStatus("camera API not supported on this browser", "bad");
-          return;
-        }
-
         if (!hasSecureCameraContext()) {
           setStatus("camera needs HTTPS (or localhost) to work", "bad");
           return;
         }
 
         try {
-          if (scanner && !active) {
-            try {
-              await scanner.clear();
-            } catch {}
-          }
-
           scanner = new Html5Qrcode("reader");
           const config = getScannerConfig();
           const cameras = await Html5Qrcode.getCameras().catch(() => []);
-          const cameraOptions = buildCameraOptions(cameras);
+          const preferredCameraId = pickBestCameraId(cameras);
+
+          const cameraOptions = [];
+          if (preferredCameraId) cameraOptions.push(preferredCameraId);
+          cameraOptions.push({ facingMode: { exact: "environment" } });
+          cameraOptions.push({ facingMode: "environment" });
+          cameraOptions.push({ facingMode: "user" });
 
           let startError = null;
           for (const cameraOption of cameraOptions) {
@@ -391,7 +342,6 @@
                 }
               );
 
-              ensureInlineVideoPlayback();
               active = true;
               setStatus("auto barcode detection active", "ok");
               return;
