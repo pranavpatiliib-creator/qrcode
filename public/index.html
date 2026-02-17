@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>College Food Distribution Scanner</title>
+    <style>
+      :root {
+        --bg: #0f172a;
+        --panel: #111827;
+        --text: #e5e7eb;
+        --accent: #22c55e;
+        --warn: #ef4444;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background: linear-gradient(145deg, #020617 0%, #0b1120 60%, #172554 100%);
+        color: var(--text);
+        display: grid;
+        place-items: center;
+        padding: 16px;
+      }
+
+      .app {
+        width: 100%;
+        max-width: 540px;
+        background: rgba(17, 24, 39, 0.95);
+        border: 1px solid rgba(148, 163, 184, 0.25);
+        border-radius: 16px;
+        padding: 16px;
+      }
+
+      h1 {
+        margin-top: 0;
+        font-size: 1.25rem;
+      }
+
+      #reader {
+        width: 100%;
+        min-height: 240px;
+        border-radius: 12px;
+        overflow: hidden;
+        background: #000;
+      }
+
+      #reader video {
+        width: 100% !important;
+        height: 100% !important;
+        object-fit: cover;
+      }
+
+      .controls {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin-top: 12px;
+      }
+
+      button,
+      input {
+        width: 100%;
+        border-radius: 10px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        padding: 10px;
+        font-size: 1rem;
+      }
+
+      button {
+        background: #1e293b;
+        color: var(--text);
+        cursor: pointer;
+      }
+
+      input {
+        background: #0f172a;
+        color: var(--text);
+      }
+
+      #status {
+        margin-top: 12px;
+        padding: 10px;
+        border-radius: 10px;
+        background: #0f172a;
+      }
+
+      .ok {
+        color: var(--accent);
+      }
+
+      .bad {
+        color: var(--warn);
+      }
+
+      .small {
+        font-size: 0.85rem;
+        color: #9ca3af;
+      }
+
+      @media (max-width: 480px) {
+        #reader {
+          min-height: 320px;
+        }
+
+        .controls {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  </head>
+  <body>
+    <main class="app">
+      <h1>College Food Distribution Scanner</h1>
+      <div id="reader"></div>
+      <div class="controls">
+        <button id="startBtn" type="button">Start Camera Scan</button>
+        <button id="stopBtn" type="button">Stop Camera</button>
+      </div>
+
+      <p class="small">Camera fallback: manually type barcode/ID below if camera is unavailable.</p>
+      <div class="controls">
+        <input id="manualId" type="text" placeholder="Enter ID manually" autocomplete="off" />
+        <button id="manualSubmit" type="button">Submit ID</button>
+      </div>
+
+      <div id="status">Status: Initializing scanner...</div>
+      <p class="small">Offline scans are cached and synced when internet returns.</p>
+    </main>
+
+    <script>
+      // Update this if your backend is hosted elsewhere.
+      const API_BASE_URL = window.location.origin;
+      const SCAN_ENDPOINT = `${API_BASE_URL}/api/scan`;
+      const OFFLINE_QUEUE_KEY = "offline_scan_queue_v1";
+
+      const statusEl = document.getElementById("status");
+      const startBtn = document.getElementById("startBtn");
+      const stopBtn = document.getElementById("stopBtn");
+      const manualIdEl = document.getElementById("manualId");
+      const manualSubmitBtn = document.getElementById("manualSubmit");
+
+      let scanner = null;
+      let active = false;
+      let lastProcessed = "";
+      let lastProcessedAt = 0;
+      let lastDecodeErrorAt = 0;
+
+      function getBarcodeFormats() {
+        if (typeof Html5QrcodeSupportedFormats === "undefined") {
+          return undefined;
+        }
+
+        const f = Html5QrcodeSupportedFormats;
+        return [
+          f.CODE_128,
+          f.CODE_39,
+          f.CODE_93,
+          f.CODABAR,
+          f.EAN_13,
+          f.EAN_8,
+          f.ITF,
+          f.UPC_A,
+          f.UPC_E,
+          f.PDF_417,
+          f.DATA_MATRIX,
+          f.AZTEC,
+          f.QR_CODE
+        ].filter(Boolean);
+      }
+
+      function setStatus(message, type) {
+        statusEl.className = type === "ok" ? "ok" : type === "bad" ? "bad" : "";
+        statusEl.textContent = `Status: ${message}`;
+      }
+
+      function hasSecureCameraContext() {
+        return window.isSecureContext || window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+      }
+
+      function pickBestCameraId(cameras) {
+        if (!cameras || cameras.length === 0) return null;
+        const preferred = ["back", "rear", "environment", "world"];
+        const match = cameras.find((cam) => preferred.some((word) => (cam.label || "").toLowerCase().includes(word)));
+        return (match || cameras[0]).id;
+      }
+
+      function isMobileDevice() {
+        return window.matchMedia("(max-width: 768px)").matches || navigator.maxTouchPoints > 1;
+      }
+
+      function ensureInlineVideoPlayback() {
+        const video = document.querySelector("#reader video");
+        if (!video) return;
+        video.setAttribute("playsinline", "true");
+        video.setAttribute("muted", "true");
+        video.playsInline = true;
+        video.muted = true;
+      }
+
+      function buildCameraOptions(cameras) {
+        const options = [];
+        const preferredCameraId = pickBestCameraId(cameras);
+
+        if (preferredCameraId) {
+          options.push(preferredCameraId);
+        }
+
+        options.push({ facingMode: { ideal: "environment" } });
+        options.push({ facingMode: "environment" });
+        options.push({ facingMode: { ideal: "user" } });
+        options.push({ facingMode: "user" });
+
+        return options;
+      }
+
+      function getScannerConfig() {
+        const config = {
+          fps: isMobileDevice() ? 12 : 15,
+          rememberLastUsedCamera: true,
+          formatsToSupport: getBarcodeFormats(),
+          experimentalFeatures: {
+            useBarCodeDetectorIfSupported: true
+          }
+        };
+
+        config.qrbox = (viewfinderWidth, viewfinderHeight) => {
+          const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
+          if (isMobileDevice()) {
+            const edge = Math.max(180, Math.floor(minEdge * 0.78));
+            return { width: edge, height: edge };
+          }
+
+          const targetWidth = Math.max(180, Math.floor(minEdge * 0.9));
+          const width = Math.min(targetWidth, Math.max(140, viewfinderWidth - 16));
+          return {
+            width,
+            height: Math.max(110, Math.floor(width * 0.62))
+          };
+        };
+
+        if (typeof Html5QrcodeScanType !== "undefined") {
+          config.supportedScanTypes = [Html5QrcodeScanType.SCAN_TYPE_CAMERA];
+        }
+
+        return config;
+      }
+
+      function readOfflineQueue() {
+        try {
+          return JSON.parse(localStorage.getItem(OFFLINE_QUEUE_KEY) || "[]");
+        } catch {
+          return [];
+        }
+      }
+
+      function writeOfflineQueue(queue) {
+        localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(queue));
+      }
+
+      function queueOfflineScan(id, source) {
+        const queue = readOfflineQueue();
+        queue.push({ id, source, queuedAt: new Date().toISOString() });
+        writeOfflineQueue(queue);
+      }
+
+      async function submitScan(id, source) {
+        const payload = { id, source };
+
+        if (!navigator.onLine) {
+          queueOfflineScan(id, source);
+          setStatus(`offline cached: ${id}`, "bad");
+          return;
+        }
+
+        try {
+          const response = await fetch(SCAN_ENDPOINT, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+
+          const data = await response.json();
+
+          if (!response.ok) {
+            setStatus(data.message || "request failed", "bad");
+            return;
+          }
+
+          if (data.message === "allowed") {
+            setStatus(`${id} -> allowed`, "ok");
+          } else {
+            setStatus(`${id} -> already taken`, "bad");
+          }
+        } catch {
+          queueOfflineScan(id, source);
+          setStatus(`network issue, cached: ${id}`, "bad");
+        }
+      }
+
+      async function syncOfflineQueue() {
+        if (!navigator.onLine) return;
+
+        const queue = readOfflineQueue();
+        if (!queue.length) return;
+
+        const remaining = [];
+
+        for (const item of queue) {
+          try {
+            const response = await fetch(SCAN_ENDPOINT, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ id: item.id, source: "sync" })
+            });
+
+            if (!response.ok) {
+              remaining.push(item);
+            }
+          } catch {
+            remaining.push(item);
+          }
+        }
+
+        writeOfflineQueue(remaining);
+        if (remaining.length === 0) {
+          setStatus("offline queue synced", "ok");
+        }
+      }
+
+      async function startScanner() {
+        if (active) return;
+
+        if (typeof Html5Qrcode === "undefined") {
+          setStatus("scanner library failed to load. check internet/CDN access", "bad");
+          return;
+        }
+
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          setStatus("camera API not supported on this browser", "bad");
+          return;
+        }
+
+        if (!hasSecureCameraContext()) {
+          setStatus("camera needs HTTPS (or localhost) to work", "bad");
+          return;
+        }
+
+        try {
+          if (scanner && !active) {
+            try {
+              await scanner.clear();
+            } catch {}
+          }
+
+          scanner = new Html5Qrcode("reader");
+          const config = getScannerConfig();
+          const cameras = await Html5Qrcode.getCameras().catch(() => []);
+          const cameraOptions = buildCameraOptions(cameras);
+
+          let startError = null;
+          for (const cameraOption of cameraOptions) {
+            try {
+              await scanner.start(
+                cameraOption,
+                config,
+                async (decodedText) => {
+                  // Prevent rapid duplicate submits from the same continuous frame.
+                  const now = Date.now();
+                  if (decodedText === lastProcessed && now - lastProcessedAt < 1800) {
+                    return;
+                  }
+                  lastProcessed = decodedText;
+                  lastProcessedAt = now;
+                  setStatus(`detected ${decodedText}, validating...`, "");
+                  await submitScan(decodedText, "camera");
+                },
+                () => {
+                  const now = Date.now();
+                  // Keep UI calm and avoid flashing every frame error.
+                  if (now - lastDecodeErrorAt > 3500) {
+                    lastDecodeErrorAt = now;
+                    setStatus("camera active - point barcode inside frame", "");
+                  }
+                }
+              );
+
+              ensureInlineVideoPlayback();
+              active = true;
+              setStatus("auto barcode detection active", "ok");
+              return;
+            } catch (err) {
+              startError = err;
+            }
+          }
+
+          throw startError || new Error("No camera could be started");
+        } catch (err) {
+          console.error("Scanner start failed:", err);
+          setStatus("camera unavailable/blocked. allow permission or use manual input", "bad");
+        }
+      }
+
+      async function stopScanner() {
+        if (!scanner || !active) return;
+
+        try {
+          await scanner.stop();
+          await scanner.clear();
+        } catch (err) {
+          console.error("Scanner stop failed:", err);
+        }
+        active = false;
+        setStatus("camera stopped", "");
+      }
+
+      startBtn.addEventListener("click", startScanner);
+      stopBtn.addEventListener("click", stopScanner);
+
+      manualSubmitBtn.addEventListener("click", async () => {
+        const id = manualIdEl.value.trim();
+        if (!id) {
+          setStatus("enter an ID first", "bad");
+          return;
+        }
+        await submitScan(id, "manual");
+        manualIdEl.value = "";
+      });
+
+      window.addEventListener("online", syncOfflineQueue);
+      window.addEventListener("load", async () => {
+        await syncOfflineQueue();
+        await startScanner();
+      });
+    </script>
+  </body>
+</html>
