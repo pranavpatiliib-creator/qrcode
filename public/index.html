@@ -208,11 +208,13 @@
       const API_BASE_URL = window.location.origin;
       const SCAN_ENDPOINT = `${API_BASE_URL}/api/scan`;
       const OFFLINE_QUEUE_KEY = "offline_scan_queue_v1";
-      const SCAN_COOLDOWN_MS = 500;
-      const FAST_SCAN_FPS_MOBILE = 24;
-      const FAST_SCAN_FPS_DESKTOP = 28;
+      const SCAN_COOLDOWN_MS = 350;
+      const FAST_SCAN_FPS_MOBILE = 20;
+      const FAST_SCAN_FPS_DESKTOP = 24;
       const REQUIRED_STABLE_DETECTIONS = 2;
-      const STABLE_WINDOW_MS = 1200;
+      const STABLE_WINDOW_MS = 550;
+      const MIN_BARCODE_LENGTH = 6;
+      const MAX_BARCODE_LENGTH = 40;
 
       const statusEl = document.getElementById("status");
       const lastSuccessEl = document.getElementById("lastSuccess");
@@ -247,7 +249,6 @@
         return [
           f.CODE_128,
           f.CODE_39,
-          f.CODABAR,
           f.EAN_13,
           f.EAN_8,
           f.ITF,
@@ -338,9 +339,16 @@
           .replace(/\s+/g, "");
       }
 
+      function isPlausibleBarcodeValue(value) {
+        if (!value) return false;
+        if (value.length < MIN_BARCODE_LENGTH || value.length > MAX_BARCODE_LENGTH) return false;
+        if (/^(.)\1+$/.test(value)) return false;
+        return true;
+      }
+
       function getStableDecodedValue(decodedText) {
         const value = normalizeDecodedValue(decodedText);
-        if (!value) {
+        if (!isPlausibleBarcodeValue(value)) {
           return null;
         }
 
@@ -404,10 +412,24 @@
         const preferredCameraId = pickBestCameraId(cameras);
 
         if (preferredCameraId) {
-          options.push(preferredCameraId);
+          options.push({
+            deviceId: { exact: preferredCameraId },
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          });
         }
 
-        options.push({ facingMode: { ideal: "environment" } });
+        options.push({
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          advanced: [{ focusMode: "continuous" }]
+        });
+        options.push({
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        });
         options.push({ facingMode: "environment" });
         options.push({ facingMode: { ideal: "user" } });
         options.push({ facingMode: "user" });
@@ -427,13 +449,12 @@
         };
 
         config.qrbox = (viewfinderWidth, viewfinderHeight) => {
-          const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
           const isMobile = isMobileDevice();
 
-          // Smaller horizontal strip improves decode speed for 1D barcodes.
-          const maxWidth = Math.max(160, viewfinderWidth - 20);
-          const width = Math.min(maxWidth, Math.max(160, Math.floor(minEdge * (isMobile ? 0.72 : 0.68))));
-          const height = Math.max(58, Math.floor(width * (isMobile ? 0.24 : 0.2)));
+          // Wide but not full-width region balances accuracy and speed for 1D barcodes.
+          const maxWidth = Math.max(220, viewfinderWidth - 14);
+          const width = Math.min(maxWidth, Math.floor(viewfinderWidth * (isMobile ? 0.92 : 0.84)));
+          const height = Math.max(68, Math.floor(width * (isMobile ? 0.22 : 0.2)));
 
           if (isMobile) {
             return { width, height };
