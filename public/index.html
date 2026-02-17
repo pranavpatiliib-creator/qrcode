@@ -139,6 +139,9 @@
       const API_BASE_URL = window.location.origin;
       const SCAN_ENDPOINT = `${API_BASE_URL}/api/scan`;
       const OFFLINE_QUEUE_KEY = "offline_scan_queue_v1";
+      const SCAN_COOLDOWN_MS = 900;
+      const FAST_SCAN_FPS_MOBILE = 20;
+      const FAST_SCAN_FPS_DESKTOP = 24;
 
       const statusEl = document.getElementById("status");
       const startBtn = document.getElementById("startBtn");
@@ -161,17 +164,12 @@
         return [
           f.CODE_128,
           f.CODE_39,
-          f.CODE_93,
           f.CODABAR,
           f.EAN_13,
           f.EAN_8,
           f.ITF,
           f.UPC_A,
-          f.UPC_E,
-          f.PDF_417,
-          f.DATA_MATRIX,
-          f.AZTEC,
-          f.QR_CODE
+          f.UPC_E
         ].filter(Boolean);
       }
 
@@ -222,7 +220,8 @@
 
       function getScannerConfig() {
         const config = {
-          fps: isMobileDevice() ? 12 : 15,
+          fps: isMobileDevice() ? FAST_SCAN_FPS_MOBILE : FAST_SCAN_FPS_DESKTOP,
+          disableFlip: true,
           rememberLastUsedCamera: true,
           formatsToSupport: getBarcodeFormats(),
           experimentalFeatures: {
@@ -232,17 +231,18 @@
 
         config.qrbox = (viewfinderWidth, viewfinderHeight) => {
           const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
-          if (isMobileDevice()) {
-            const edge = Math.max(180, Math.floor(minEdge * 0.78));
-            return { width: edge, height: edge };
+          const isMobile = isMobileDevice();
+
+          // Barcodes scan best with a wide horizontal strip instead of a square.
+          const maxWidth = Math.max(180, viewfinderWidth - 12);
+          const width = Math.min(maxWidth, Math.max(180, Math.floor(minEdge * (isMobile ? 0.84 : 0.78))));
+          const height = Math.max(64, Math.floor(width * (isMobile ? 0.3 : 0.26)));
+
+          if (isMobile) {
+            return { width, height };
           }
 
-          const targetWidth = Math.max(180, Math.floor(minEdge * 0.9));
-          const width = Math.min(targetWidth, Math.max(140, viewfinderWidth - 16));
-          return {
-            width,
-            height: Math.max(110, Math.floor(width * 0.62))
-          };
+          return { width, height };
         };
 
         if (typeof Html5QrcodeScanType !== "undefined") {
@@ -373,20 +373,21 @@
                 async (decodedText) => {
                   // Prevent rapid duplicate submits from the same continuous frame.
                   const now = Date.now();
-                  if (decodedText === lastProcessed && now - lastProcessedAt < 1800) {
+                  if (decodedText === lastProcessed && now - lastProcessedAt < SCAN_COOLDOWN_MS) {
                     return;
                   }
                   lastProcessed = decodedText;
                   lastProcessedAt = now;
                   setStatus(`detected ${decodedText}, validating...`, "");
-                  await submitScan(decodedText, "camera");
+                  // Keep decode loop fast by not blocking on network.
+                  void submitScan(decodedText, "camera");
                 },
                 () => {
                   const now = Date.now();
                   // Keep UI calm and avoid flashing every frame error.
                   if (now - lastDecodeErrorAt > 3500) {
                     lastDecodeErrorAt = now;
-                    setStatus("camera active - point barcode inside frame", "");
+                    setStatus("camera active - keep barcode horizontal inside frame", "");
                   }
                 }
               );
