@@ -63,6 +63,28 @@
         margin-top: 12px;
       }
 
+      .hidden {
+        display: none;
+      }
+
+      .login-panel {
+        border: 1px solid rgba(148, 163, 184, 0.25);
+        border-radius: 12px;
+        padding: 12px;
+        background: rgba(15, 23, 42, 0.7);
+        margin-bottom: 10px;
+      }
+
+      .login-panel h2 {
+        margin: 0 0 10px;
+        font-size: 1rem;
+      }
+
+      #loginError {
+        margin-top: 8px;
+        min-height: 20px;
+      }
+
       button,
       input {
         width: 100%;
@@ -186,25 +208,41 @@
       <div id="failFlash" aria-hidden="true">
         <div class="cross">&#10007;</div>
       </div>
-      <div id="reader"></div>
+      <section id="loginPanel" class="login-panel">
+        <h2>Operator Login</h2>
+        <div class="controls">
+          <input id="loginUserId" type="text" placeholder="User ID" autocomplete="username" value="safe" />
+          <input id="loginPassword" type="password" placeholder="Password" autocomplete="current-password" />
+        </div>
+        <div class="controls">
+          <button id="loginBtn" type="button">Login</button>
+        </div>
+        <div id="loginError" class="small bad"></div>
+      </section>
 
-      <p class="small">Camera fallback: manually type barcode/ID below if camera is unavailable.</p>
-      <div class="controls">
-        <input id="manualId" type="text" placeholder="Enter ID manually" autocomplete="off" />
-        <button id="manualSubmit" type="button">Submit ID</button>
-      </div>
+      <section id="scannerSection" class="hidden">
+        <div id="reader"></div>
 
-      <div id="status">Status: Initializing scanner...</div>
-      <div id="lastSuccess">Last successful scan: none</div>
-      <div id="successCount">Successful scans: 0</div>
-      <p class="small">Offline scans are cached and synced when internet returns.</p>
+        <p class="small">Camera fallback: manually type barcode/ID below if camera is unavailable.</p>
+        <div class="controls">
+          <input id="manualId" type="text" placeholder="Enter ID manually" autocomplete="off" />
+          <button id="manualSubmit" type="button">Submit ID</button>
+        </div>
+
+        <div id="status">Status: Initializing scanner...</div>
+        <div id="lastSuccess">Last successful scan: none</div>
+        <div id="successCount">Successful scans: 0</div>
+        <p class="small">Offline scans are cached and synced when internet returns.</p>
+      </section>
     </main>
 
     <script>
       // Update this if your backend is hosted elsewhere.
       const API_BASE_URL = window.location.origin;
+      const AUTH_LOGIN_ENDPOINT = `${API_BASE_URL}/api/auth/login`;
       const SCAN_ENDPOINT = `${API_BASE_URL}/api/scan`;
       const OFFLINE_QUEUE_KEY = "offline_scan_queue_v1";
+      const AUTH_TOKEN_KEY = "scanner_auth_token_v1";
       const SCAN_COOLDOWN_MS = 350;
       const FAST_SCAN_FPS_MOBILE = 20;
       const FAST_SCAN_FPS_DESKTOP = 24;
@@ -218,11 +256,18 @@
       const successCountEl = document.getElementById("successCount");
       const successFlashEl = document.getElementById("successFlash");
       const failFlashEl = document.getElementById("failFlash");
+      const loginPanelEl = document.getElementById("loginPanel");
+      const scannerSectionEl = document.getElementById("scannerSection");
+      const loginUserIdEl = document.getElementById("loginUserId");
+      const loginPasswordEl = document.getElementById("loginPassword");
+      const loginBtnEl = document.getElementById("loginBtn");
+      const loginErrorEl = document.getElementById("loginError");
       const manualIdEl = document.getElementById("manualId");
       const manualSubmitBtn = document.getElementById("manualSubmit");
 
       let scanner = null;
       let active = false;
+      let authToken = sessionStorage.getItem(AUTH_TOKEN_KEY) || "";
       let lastProcessed = "";
       let lastProcessedAt = 0;
       let lastDecodeErrorAt = 0;
@@ -255,6 +300,89 @@
       function setStatus(message, type) {
         statusEl.className = type === "ok" ? "ok" : type === "bad" ? "bad" : "";
         statusEl.textContent = `Status: ${message}`;
+      }
+
+      function setLoginState(isLoggedIn) {
+        if (isLoggedIn) {
+          loginPanelEl.classList.add("hidden");
+          scannerSectionEl.classList.remove("hidden");
+          return;
+        }
+
+        loginPanelEl.classList.remove("hidden");
+        scannerSectionEl.classList.add("hidden");
+      }
+
+      function clearAuth() {
+        authToken = "";
+        sessionStorage.removeItem(AUTH_TOKEN_KEY);
+      }
+
+      function getAuthHeaders(baseHeaders = {}) {
+        if (!authToken) return baseHeaders;
+        return { ...baseHeaders, Authorization: `Bearer ${authToken}` };
+      }
+
+      async function stopScannerSilently() {
+        if (!scanner || !active) return;
+        try {
+          await scanner.stop();
+          await scanner.clear();
+        } catch {}
+        active = false;
+      }
+
+      async function handleAuthRequired(message) {
+        await stopScannerSilently();
+        clearAuth();
+        loginErrorEl.textContent = message || "Login required";
+        setLoginState(false);
+        setStatus("login required", "bad");
+      }
+
+      async function loginOperator() {
+        const userId = loginUserIdEl.value.trim();
+        const password = loginPasswordEl.value;
+
+        if (!userId || !password) {
+          loginErrorEl.textContent = "Enter user ID and password";
+          return;
+        }
+
+        loginBtnEl.disabled = true;
+        loginErrorEl.textContent = "";
+
+        try {
+          const response = await fetch(AUTH_LOGIN_ENDPOINT, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ userId, password })
+          });
+
+          let data = {};
+          try {
+            data = await response.json();
+          } catch {
+            data = {};
+          }
+
+          if (!response.ok || !data?.data?.token) {
+            loginErrorEl.textContent = data.message || "Invalid credentials";
+            return;
+          }
+
+          authToken = data.data.token;
+          sessionStorage.setItem(AUTH_TOKEN_KEY, authToken);
+          loginPasswordEl.value = "";
+          setLoginState(true);
+          setStatus("login successful, starting scanner...", "ok");
+          await syncOfflineQueue();
+          await startScanner();
+        } catch {
+          loginErrorEl.textContent = "Unable to login. Check connection.";
+        } finally {
+          loginBtnEl.disabled = false;
+        }
       }
 
       async function primeAudioContext() {
@@ -488,6 +616,11 @@
         const normalizedId = (id || "").trim();
         if (!normalizedId) return;
 
+        if (!authToken) {
+          await handleAuthRequired("Please login to continue");
+          return;
+        }
+
         if (inFlightIds.has(normalizedId)) {
           return;
         }
@@ -502,7 +635,7 @@
         try {
           const response = await fetch(SCAN_ENDPOINT, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: getAuthHeaders({ "Content-Type": "application/json" }),
             body: JSON.stringify(payload),
             cache: "no-store"
           });
@@ -512,6 +645,11 @@
             data = await response.json();
           } catch {
             data = {};
+          }
+
+          if (response.status === 401) {
+            await handleAuthRequired("Session expired. Please login again.");
+            return;
           }
 
           if (!response.ok) {
@@ -538,20 +676,27 @@
       }
 
       async function syncOfflineQueue() {
-        if (!navigator.onLine) return;
+        if (!navigator.onLine || !authToken) return;
 
         const queue = readOfflineQueue();
         if (!queue.length) return;
 
         const remaining = [];
 
-        for (const item of queue) {
+        for (let index = 0; index < queue.length; index += 1) {
+          const item = queue[index];
           try {
             const response = await fetch(SCAN_ENDPOINT, {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers: getAuthHeaders({ "Content-Type": "application/json" }),
               body: JSON.stringify({ id: item.id, source: "sync" })
             });
+
+            if (response.status === 401) {
+              remaining.push(item, ...queue.slice(index + 1));
+              await handleAuthRequired("Session expired. Please login again.");
+              break;
+            }
 
             if (!response.ok) {
               remaining.push(item);
@@ -569,6 +714,11 @@
 
       async function startScanner() {
         if (active) return;
+
+        if (!authToken) {
+          await handleAuthRequired("Please login to start scanner");
+          return;
+        }
 
         if (typeof Html5Qrcode === "undefined") {
           setStatus("scanner library failed to load. check internet/CDN access", "bad");
@@ -651,6 +801,10 @@
       }
 
       manualSubmitBtn.addEventListener("click", async () => {
+        if (!authToken) {
+          await handleAuthRequired("Please login to continue");
+          return;
+        }
         const id = manualIdEl.value.trim();
         if (!id) {
           setStatus("enter an ID first", "bad");
@@ -658,6 +812,13 @@
         }
         await submitScan(id, "manual");
         manualIdEl.value = "";
+      });
+
+      loginBtnEl.addEventListener("click", loginOperator);
+      loginPasswordEl.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          void loginOperator();
+        }
       });
 
       window.addEventListener("online", syncOfflineQueue);
@@ -670,6 +831,12 @@
       );
       window.addEventListener("load", async () => {
         await primeAudioContext();
+        if (!authToken) {
+          setLoginState(false);
+          setStatus("please login to start scanner", "");
+          return;
+        }
+        setLoginState(true);
         await syncOfflineQueue();
         await startScanner();
       });

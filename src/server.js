@@ -14,6 +14,7 @@ const morgan = require("morgan");
 
 const { env } = require("./config/env");
 const { connectDB } = require("./config/db");
+const authRoutes = require("./routes/authRoutes");
 const scanRoutes = require("./routes/scanRoutes");
 const { errorHandler, notFoundHandler } = require("./middleware/errorHandlers");
 
@@ -68,6 +69,7 @@ app.get("/health", (_req, res) => {
   res.status(200).json({ status: "ok" });
 });
 
+app.use("/api/auth", authRoutes);
 app.use("/api", scanRoutes);
 app.use(notFoundHandler);
 app.use(errorHandler);

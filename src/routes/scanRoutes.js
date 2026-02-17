@@ -3,6 +3,7 @@
  */
 const express = require("express");
 const Scan = require("../models/Scan");
+const { requireAuth } = require("../middleware/requireAuth");
 const { validateScanBody } = require("../middleware/validateScan");
 
 const router = express.Router();
@@ -11,7 +12,7 @@ const router = express.Router();
  * POST /api/scan
  * Body: { id: string, source?: "camera" | "manual" | "sync" }
  */
-router.post("/scan", validateScanBody, async (req, res, next) => {
+router.post("/scan", requireAuth, validateScanBody, async (req, res, next) => {
   try {
     const { studentId, source } = req.validatedScan;
 
