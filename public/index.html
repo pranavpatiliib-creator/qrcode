@@ -247,15 +247,16 @@
       const SCAN_ENDPOINT = `${API_BASE_URL}/api/scan`;
       const OFFLINE_QUEUE_KEY = "offline_scan_queue_v1";
       const AUTH_TOKEN_KEY = "scanner_auth_token_v1";
-      const SCAN_COOLDOWN_MS = 350;
-      const FAST_SCAN_FPS_MOBILE = 14;
-      const FAST_SCAN_FPS_DESKTOP = 18;
-      const REQUIRED_STABLE_DETECTIONS = 2;
-      const STABLE_WINDOW_MS = 550;
+      const SCAN_COOLDOWN_MS = 120;
+      const FAST_SCAN_FPS_MOBILE = 24;
+      const FAST_SCAN_FPS_DESKTOP = 30;
+      const REQUIRED_STABLE_DETECTIONS = 1;
+      const STABLE_WINDOW_MS = 220;
       const MIN_BARCODE_LENGTH = 5;
       const MAX_RAW_DECODE_LENGTH = 256;
       const TARGET_ID_DIGITS = 5;
       const CAMERA_RETRY_DELAY_MS = 180;
+      const CAMERA_FEED_READY_TIMEOUT_MS = 2200;
 
       const statusEl = document.getElementById("status");
       const lastSuccessEl = document.getElementById("lastSuccess");
@@ -300,14 +301,8 @@
           f.QR_CODE,
           f.CODE_128,
           f.CODE_39,
-          f.CODE_93,
-          f.CODABAR,
           f.EAN_13,
-          f.EAN_8,
-          f.ITF,
-          f.UPC_A,
-          f.UPC_E,
-          f.DATA_MATRIX
+          f.EAN_8
         ].filter(Boolean);
       }
 
@@ -598,6 +593,18 @@
         video.muted = true;
       }
 
+      async function ensureVideoFeedReady(timeoutMs = CAMERA_FEED_READY_TIMEOUT_MS) {
+        const startedAt = Date.now();
+        while (Date.now() - startedAt < timeoutMs) {
+          const video = document.querySelector("#reader video");
+          if (video && video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
+            return true;
+          }
+          await wait(80);
+        }
+        return false;
+      }
+
       function buildCameraOptions(cameras) {
         const options = [];
         const seen = new Set();
@@ -619,6 +626,7 @@
         options.push({ facingMode: { ideal: "environment" } });
         options.push({ facingMode: "environment" });
         options.push({ facingMode: { ideal: "user" } });
+        options.push({});
 
         return options;
       }
@@ -653,8 +661,8 @@
 
         config.qrbox = (viewfinderWidth, viewfinderHeight) => {
           const isMobile = isMobileDevice();
-          const width = Math.max(240, Math.floor(viewfinderWidth * (isMobile ? 0.9 : 0.82)));
-          const height = Math.max(180, Math.floor(viewfinderHeight * (isMobile ? 0.6 : 0.52)));
+          const width = Math.max(220, Math.floor(viewfinderWidth * (isMobile ? 0.78 : 0.68)));
+          const height = Math.max(130, Math.floor(viewfinderHeight * (isMobile ? 0.34 : 0.28)));
           return { width, height };
         };
 
@@ -860,6 +868,11 @@
                   }
                 }
               );
+
+              const feedReady = await ensureVideoFeedReady();
+              if (!feedReady) {
+                throw new Error("camera opened but preview feed is black/not ready");
+              }
 
               updateStartButtonState();
               setStatus(`camera scanner active (${Date.now() - startRequestedAt}ms)`, "ok");
