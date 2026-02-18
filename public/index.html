@@ -248,8 +248,8 @@
       const OFFLINE_QUEUE_KEY = "offline_scan_queue_v1";
       const AUTH_TOKEN_KEY = "scanner_auth_token_v1";
       const SCAN_COOLDOWN_MS = 350;
-      const FAST_SCAN_FPS_MOBILE = 20;
-      const FAST_SCAN_FPS_DESKTOP = 24;
+      const FAST_SCAN_FPS_MOBILE = 14;
+      const FAST_SCAN_FPS_DESKTOP = 18;
       const REQUIRED_STABLE_DETECTIONS = 2;
       const STABLE_WINDOW_MS = 550;
       const MIN_BARCODE_LENGTH = 5;
@@ -289,8 +289,6 @@
       let startingScanner = false;
       let cachedCameras = [];
       let cachedPreferredCameraId = "";
-      let permissionPrimed = false;
-      let primingCameraPromise = null;
 
       function getBarcodeFormats() {
         if (typeof Html5QrcodeSupportedFormats === "undefined") {
@@ -356,14 +354,43 @@
         return { ...baseHeaders, Authorization: `Bearer ${authToken}` };
       }
 
-      async function stopScannerSilently() {
-        if (!scanner || !active) return;
+      async function cleanupScannerInstance() {
+        if (!scanner) return;
         try {
           await scanner.stop();
+        } catch {}
+        try {
           await scanner.clear();
         } catch {}
+        scanner = null;
         active = false;
+      }
+
+      async function stopScannerSilently() {
+        if (!scanner) return;
+        await cleanupScannerInstance();
         updateStartButtonState();
+      }
+
+      function formatCameraError(err) {
+        if (!err) return "unknown camera error";
+        const name = err.name ? String(err.name) : "";
+        const message = err.message ? String(err.message) : "camera unavailable/blocked";
+        return name ? `${name}: ${message}` : message;
+      }
+
+      async function beginCameraSession(cameraOption, config, onSuccess, onFailure) {
+        try {
+          await cleanupScannerInstance();
+          scanner = new Html5Qrcode("reader");
+          await scanner.start(cameraOption, config, onSuccess, onFailure);
+          ensureInlineVideoPlayback();
+          active = true;
+          return true;
+        } catch (err) {
+          await cleanupScannerInstance();
+          throw err;
+        }
       }
 
       async function handleAuthRequired(message) {
@@ -573,22 +600,25 @@
 
       function buildCameraOptions(cameras) {
         const options = [];
+        const seen = new Set();
         const preferredCameraId = cachedPreferredCameraId || pickBestCameraId(cameras);
 
         if (preferredCameraId) {
-          options.push({
-            deviceId: { ideal: preferredCameraId },
-            width: { ideal: 1280 },
-            height: { ideal: 720 }
-          });
+          options.push(preferredCameraId);
+          seen.add(preferredCameraId);
         }
 
-        options.push({
-          facingMode: { ideal: "environment" },
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        });
+        if (Array.isArray(cameras)) {
+          for (const cam of cameras) {
+            if (!cam || !cam.id || seen.has(cam.id)) continue;
+            seen.add(cam.id);
+            options.push(cam.id);
+          }
+        }
+
+        options.push({ facingMode: { ideal: "environment" } });
         options.push({ facingMode: "environment" });
+        options.push({ facingMode: { ideal: "user" } });
 
         return options;
       }
@@ -613,58 +643,10 @@
         return cachedCameras;
       }
 
-      async function primeCameraPermissionAndCache() {
-        if (permissionPrimed) {
-          await cacheAvailableCameras();
-          return;
-        }
-
-        if (primingCameraPromise) {
-          await primingCameraPromise;
-          return;
-        }
-
-        primingCameraPromise = (async () => {
-          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            return;
-          }
-          try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-              video: { facingMode: { ideal: "environment" } },
-              audio: false
-            });
-            const [track] = stream.getVideoTracks();
-            if (track) {
-              const settings = track.getSettings ? track.getSettings() : {};
-              if (settings.deviceId) {
-                cachedPreferredCameraId = settings.deviceId;
-              }
-              track.stop();
-            }
-            stream.getTracks().forEach((t) => t.stop());
-            permissionPrimed = true;
-          } catch {}
-
-          await cacheAvailableCameras();
-        })();
-
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          primingCameraPromise = null;
-          return;
-        }
-
-        try {
-          await primingCameraPromise;
-        } finally {
-          primingCameraPromise = null;
-        }
-      }
-
       function getScannerConfig() {
         const config = {
           fps: isMobileDevice() ? FAST_SCAN_FPS_MOBILE : FAST_SCAN_FPS_DESKTOP,
           disableFlip: false,
-          aspectRatio: isMobileDevice() ? 1.333334 : 1.777778,
           rememberLastUsedCamera: true,
           formatsToSupport: getBarcodeFormats()
         };
@@ -831,23 +813,16 @@
             return;
           }
 
-          if (scanner && !active) {
-            try {
-              await scanner.clear();
-            } catch {}
-          }
-
-          if (!scanner) {
-            scanner = new Html5Qrcode("reader");
-          }
           const config = getScannerConfig();
           const cameras = cachedCameras.length ? cachedCameras : await cacheAvailableCameras();
           const cameraOptions = buildCameraOptions(cameras);
+          const attemptErrors = [];
 
           let startError = null;
-          for (const cameraOption of cameraOptions) {
+          for (let index = 0; index < cameraOptions.length; index += 1) {
+            const cameraOption = cameraOptions[index];
             try {
-              await scanner.start(
+              await beginCameraSession(
                 cameraOption,
                 config,
                 (decodedText, decodedResult) => {
@@ -886,13 +861,12 @@
                 }
               );
 
-              ensureInlineVideoPlayback();
-              active = true;
               updateStartButtonState();
               setStatus(`camera scanner active (${Date.now() - startRequestedAt}ms)`, "ok");
               return;
             } catch (err) {
               startError = err;
+              attemptErrors.push(`try ${index + 1}: ${formatCameraError(err)}`);
               const errName = err && err.name ? String(err.name) : "";
               if (errName === "NotReadableError" || errName === "AbortError" || errName === "TrackStartError") {
                 await wait(CAMERA_RETRY_DELAY_MS);
@@ -900,6 +874,9 @@
             }
           }
 
+          if (attemptErrors.length > 0) {
+            throw new Error(attemptErrors.slice(0, 3).join(" | "));
+          }
           throw startError || new Error("No camera could be started");
         } catch (err) {
           console.error("Scanner start failed:", err);
@@ -927,14 +904,6 @@
       });
 
       loginBtnEl.addEventListener("click", loginOperator);
-      startCameraBtnEl.addEventListener(
-        "pointerdown",
-        () => {
-          if (!authToken || active || startingScanner) return;
-          void primeCameraPermissionAndCache();
-        },
-        { passive: true }
-      );
       startCameraBtnEl.addEventListener("click", async () => {
         await primeAudioContext();
         await startScanner();
