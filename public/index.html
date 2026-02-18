@@ -255,6 +255,7 @@
       const MIN_BARCODE_LENGTH = 5;
       const MAX_RAW_DECODE_LENGTH = 256;
       const TARGET_ID_DIGITS = 5;
+      const CAMERA_RETRY_DELAY_MS = 180;
 
       const statusEl = document.getElementById("status");
       const lastSuccessEl = document.getElementById("lastSuccess");
@@ -288,6 +289,8 @@
       let startingScanner = false;
       let cachedCameras = [];
       let cachedPreferredCameraId = "";
+      let permissionPrimed = false;
+      let primingCameraPromise = null;
 
       function getBarcodeFormats() {
         if (typeof Html5QrcodeSupportedFormats === "undefined") {
@@ -574,7 +577,7 @@
 
         if (preferredCameraId) {
           options.push({
-            deviceId: { exact: preferredCameraId },
+            deviceId: { ideal: preferredCameraId },
             width: { ideal: 1280 },
             height: { ideal: 720 }
           });
@@ -588,6 +591,12 @@
         options.push({ facingMode: "environment" });
 
         return options;
+      }
+
+      function wait(ms) {
+        return new Promise((resolve) => {
+          setTimeout(resolve, ms);
+        });
       }
 
       async function cacheAvailableCameras() {
@@ -605,26 +614,50 @@
       }
 
       async function primeCameraPermissionAndCache() {
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        if (permissionPrimed) {
+          await cacheAvailableCameras();
           return;
         }
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: { ideal: "environment" } },
-            audio: false
-          });
-          const [track] = stream.getVideoTracks();
-          if (track) {
-            const settings = track.getSettings ? track.getSettings() : {};
-            if (settings.deviceId) {
-              cachedPreferredCameraId = settings.deviceId;
-            }
-            track.stop();
-          }
-          stream.getTracks().forEach((t) => t.stop());
-        } catch {}
 
-        await cacheAvailableCameras();
+        if (primingCameraPromise) {
+          await primingCameraPromise;
+          return;
+        }
+
+        primingCameraPromise = (async () => {
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            return;
+          }
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+              video: { facingMode: { ideal: "environment" } },
+              audio: false
+            });
+            const [track] = stream.getVideoTracks();
+            if (track) {
+              const settings = track.getSettings ? track.getSettings() : {};
+              if (settings.deviceId) {
+                cachedPreferredCameraId = settings.deviceId;
+              }
+              track.stop();
+            }
+            stream.getTracks().forEach((t) => t.stop());
+            permissionPrimed = true;
+          } catch {}
+
+          await cacheAvailableCameras();
+        })();
+
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          primingCameraPromise = null;
+          return;
+        }
+
+        try {
+          await primingCameraPromise;
+        } finally {
+          primingCameraPromise = null;
+        }
       }
 
       function getScannerConfig() {
@@ -798,8 +831,6 @@
             return;
           }
 
-          await primeCameraPermissionAndCache();
-
           if (scanner && !active) {
             try {
               await scanner.clear();
@@ -862,14 +893,19 @@
               return;
             } catch (err) {
               startError = err;
+              const errName = err && err.name ? String(err.name) : "";
+              if (errName === "NotReadableError" || errName === "AbortError" || errName === "TrackStartError") {
+                await wait(CAMERA_RETRY_DELAY_MS);
+              }
             }
           }
 
           throw startError || new Error("No camera could be started");
         } catch (err) {
           console.error("Scanner start failed:", err);
+          const errorName = err && err.name ? `${err.name}: ` : "";
           const errorText = err && err.message ? err.message : "camera unavailable/blocked";
-          setStatus(`${errorText}. allow permission or use manual input`, "bad");
+          setStatus(`${errorName}${errorText}. allow permission or use manual input`, "bad");
         } finally {
           startingScanner = false;
           updateStartButtonState();
