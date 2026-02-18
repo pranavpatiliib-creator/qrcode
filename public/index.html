@@ -223,6 +223,10 @@
       <section id="scannerSection" class="hidden">
         <div id="reader"></div>
 
+        <div class="controls">
+          <button id="startCameraBtn" type="button">Start Camera</button>
+        </div>
+
         <p class="small">Camera fallback: manually type barcode/ID below if camera is unavailable.</p>
         <div class="controls">
           <input id="manualId" type="text" placeholder="Enter ID manually" autocomplete="off" />
@@ -249,7 +253,8 @@
       const REQUIRED_STABLE_DETECTIONS = 2;
       const STABLE_WINDOW_MS = 550;
       const MIN_BARCODE_LENGTH = 5;
-      const MAX_BARCODE_LENGTH = 40;
+      const MAX_RAW_DECODE_LENGTH = 256;
+      const TARGET_ID_DIGITS = 5;
 
       const statusEl = document.getElementById("status");
       const lastSuccessEl = document.getElementById("lastSuccess");
@@ -262,6 +267,7 @@
       const loginPasswordEl = document.getElementById("loginPassword");
       const loginBtnEl = document.getElementById("loginBtn");
       const loginErrorEl = document.getElementById("loginError");
+      const startCameraBtnEl = document.getElementById("startCameraBtn");
       const manualIdEl = document.getElementById("manualId");
       const manualSubmitBtn = document.getElementById("manualSubmit");
 
@@ -279,6 +285,9 @@
       let successFlashTimer = null;
       let failFlashTimer = null;
       let audioContext = null;
+      let startingScanner = false;
+      let cachedCameras = [];
+      let cachedPreferredCameraId = "";
 
       function getBarcodeFormats() {
         if (typeof Html5QrcodeSupportedFormats === "undefined") {
@@ -287,13 +296,17 @@
 
         const f = Html5QrcodeSupportedFormats;
         return [
+          f.QR_CODE,
           f.CODE_128,
           f.CODE_39,
+          f.CODE_93,
+          f.CODABAR,
           f.EAN_13,
           f.EAN_8,
           f.ITF,
           f.UPC_A,
-          f.UPC_E
+          f.UPC_E,
+          f.DATA_MATRIX
         ].filter(Boolean);
       }
 
@@ -306,11 +319,28 @@
         if (isLoggedIn) {
           loginPanelEl.classList.add("hidden");
           scannerSectionEl.classList.remove("hidden");
+          updateStartButtonState();
           return;
         }
 
         loginPanelEl.classList.remove("hidden");
         scannerSectionEl.classList.add("hidden");
+        updateStartButtonState();
+      }
+
+      function updateStartButtonState() {
+        if (!startCameraBtnEl) return;
+        const canStart = Boolean(authToken) && !active && !startingScanner;
+        startCameraBtnEl.disabled = !canStart;
+        if (active) {
+          startCameraBtnEl.textContent = "Camera Running";
+          return;
+        }
+        if (startingScanner) {
+          startCameraBtnEl.textContent = "Starting Camera...";
+          return;
+        }
+        startCameraBtnEl.textContent = "Start Camera";
       }
 
       function clearAuth() {
@@ -330,6 +360,7 @@
           await scanner.clear();
         } catch {}
         active = false;
+        updateStartButtonState();
       }
 
       async function handleAuthRequired(message) {
@@ -375,9 +406,9 @@
           sessionStorage.setItem(AUTH_TOKEN_KEY, authToken);
           loginPasswordEl.value = "";
           setLoginState(true);
-          setStatus("login successful, starting scanner...", "ok");
+          setStatus("login successful. tap Start Camera to open scanner", "ok");
           await syncOfflineQueue();
-          await startScanner();
+          updateStartButtonState();
         } catch {
           loginErrorEl.textContent = "Unable to login. Check connection.";
         } finally {
@@ -462,18 +493,25 @@
           .replace(/\s+/g, "");
       }
 
+      function extractCanonicalScanValue(value) {
+        const match = value.match(new RegExp(`(\\d{${TARGET_ID_DIGITS}})(?!.*\\d)`));
+        return match ? match[1] : value;
+      }
+
       function isPlausibleBarcodeValue(value) {
         if (!value) return false;
-        if (value.length < MIN_BARCODE_LENGTH || value.length > MAX_BARCODE_LENGTH) return false;
+        if (value.length > MAX_RAW_DECODE_LENGTH) return false;
+        if (value.length < MIN_BARCODE_LENGTH && !new RegExp(`\\d{${TARGET_ID_DIGITS}}`).test(value)) return false;
         if (/^(.)\1+$/.test(value)) return false;
         return true;
       }
 
       function getStableDecodedValue(decodedText) {
-        const value = normalizeDecodedValue(decodedText);
-        if (!isPlausibleBarcodeValue(value)) {
+        const rawValue = normalizeDecodedValue(decodedText);
+        if (!isPlausibleBarcodeValue(rawValue)) {
           return null;
         }
+        const value = extractCanonicalScanValue(rawValue);
 
         const now = Date.now();
         if (value === pendingDecoded && now - pendingStartedAt <= STABLE_WINDOW_MS) {
@@ -532,7 +570,7 @@
 
       function buildCameraOptions(cameras) {
         const options = [];
-        const preferredCameraId = pickBestCameraId(cameras);
+        const preferredCameraId = cachedPreferredCameraId || pickBestCameraId(cameras);
 
         if (preferredCameraId) {
           options.push({
@@ -545,44 +583,63 @@
         options.push({
           facingMode: { ideal: "environment" },
           width: { ideal: 1280 },
-          height: { ideal: 720 },
-          advanced: [{ focusMode: "continuous" }]
-        });
-        options.push({
-          facingMode: { ideal: "environment" },
-          width: { ideal: 1280 },
           height: { ideal: 720 }
         });
         options.push({ facingMode: "environment" });
-        options.push({ facingMode: { ideal: "user" } });
-        options.push({ facingMode: "user" });
 
         return options;
+      }
+
+      async function cacheAvailableCameras() {
+        if (typeof Html5Qrcode === "undefined") {
+          return cachedCameras;
+        }
+        const cameras = await Html5Qrcode.getCameras().catch(() => []);
+        if (Array.isArray(cameras) && cameras.length) {
+          cachedCameras = cameras;
+          if (!cachedPreferredCameraId) {
+            cachedPreferredCameraId = pickBestCameraId(cameras) || "";
+          }
+        }
+        return cachedCameras;
+      }
+
+      async function primeCameraPermissionAndCache() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          return;
+        }
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal: "environment" } },
+            audio: false
+          });
+          const [track] = stream.getVideoTracks();
+          if (track) {
+            const settings = track.getSettings ? track.getSettings() : {};
+            if (settings.deviceId) {
+              cachedPreferredCameraId = settings.deviceId;
+            }
+            track.stop();
+          }
+          stream.getTracks().forEach((t) => t.stop());
+        } catch {}
+
+        await cacheAvailableCameras();
       }
 
       function getScannerConfig() {
         const config = {
           fps: isMobileDevice() ? FAST_SCAN_FPS_MOBILE : FAST_SCAN_FPS_DESKTOP,
-          disableFlip: true,
+          disableFlip: false,
+          aspectRatio: isMobileDevice() ? 1.333334 : 1.777778,
           rememberLastUsedCamera: true,
-          formatsToSupport: getBarcodeFormats(),
-          experimentalFeatures: {
-            useBarCodeDetectorIfSupported: true
-          }
+          formatsToSupport: getBarcodeFormats()
         };
 
         config.qrbox = (viewfinderWidth, viewfinderHeight) => {
           const isMobile = isMobileDevice();
-
-          // Wide but not full-width region balances accuracy and speed for 1D barcodes.
-          const maxWidth = Math.max(220, viewfinderWidth - 14);
-          const width = Math.min(maxWidth, Math.floor(viewfinderWidth * (isMobile ? 0.92 : 0.84)));
-          const height = Math.max(68, Math.floor(width * (isMobile ? 0.22 : 0.2)));
-
-          if (isMobile) {
-            return { width, height };
-          }
-
+          const width = Math.max(240, Math.floor(viewfinderWidth * (isMobile ? 0.9 : 0.82)));
+          const height = Math.max(180, Math.floor(viewfinderHeight * (isMobile ? 0.6 : 0.52)));
           return { width, height };
         };
 
@@ -713,38 +770,47 @@
       }
 
       async function startScanner() {
-        if (active) return;
+        if (active || startingScanner) return;
 
-        if (!authToken) {
-          await handleAuthRequired("Please login to start scanner");
-          return;
-        }
-
-        if (typeof Html5Qrcode === "undefined") {
-          setStatus("scanner library failed to load. check internet/CDN access", "bad");
-          return;
-        }
-
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          setStatus("camera API not supported on this browser", "bad");
-          return;
-        }
-
-        if (!hasSecureCameraContext()) {
-          setStatus("camera needs HTTPS (or localhost) to work", "bad");
-          return;
-        }
+        startingScanner = true;
+        updateStartButtonState();
+        const startRequestedAt = Date.now();
+        setStatus("opening camera...", "");
 
         try {
+          if (!authToken) {
+            await handleAuthRequired("Please login to start scanner");
+            return;
+          }
+
+          if (typeof Html5Qrcode === "undefined") {
+            setStatus("scanner library failed to load. check internet/CDN access", "bad");
+            return;
+          }
+
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            setStatus("camera API not supported on this browser", "bad");
+            return;
+          }
+
+          if (!hasSecureCameraContext()) {
+            setStatus("camera needs HTTPS (or localhost) to work", "bad");
+            return;
+          }
+
+          await primeCameraPermissionAndCache();
+
           if (scanner && !active) {
             try {
               await scanner.clear();
             } catch {}
           }
 
-          scanner = new Html5Qrcode("reader");
+          if (!scanner) {
+            scanner = new Html5Qrcode("reader");
+          }
           const config = getScannerConfig();
-          const cameras = await Html5Qrcode.getCameras().catch(() => []);
+          const cameras = cachedCameras.length ? cachedCameras : await cacheAvailableCameras();
           const cameraOptions = buildCameraOptions(cameras);
 
           let startError = null;
@@ -753,7 +819,7 @@
               await scanner.start(
                 cameraOption,
                 config,
-                (decodedText) => {
+                (decodedText, decodedResult) => {
                   const stableValue = getStableDecodedValue(decodedText);
                   if (!stableValue) {
                     return;
@@ -769,7 +835,13 @@
                   }
                   lastProcessed = stableValue;
                   lastProcessedAt = now;
-                  setStatus(`detected ${stableValue}, validating...`, "");
+                  const formatName = decodedResult && decodedResult.result && decodedResult.result.format
+                    ? decodedResult.result.format.formatName
+                    : "";
+                  setStatus(
+                    formatName ? `detected ${stableValue} (${formatName}), validating...` : `detected ${stableValue}, validating...`,
+                    ""
+                  );
                   // Keep decode loop fast by not blocking on network.
                   void submitScan(stableValue, "camera");
                 },
@@ -778,14 +850,15 @@
                   // Keep UI calm and avoid flashing every frame error.
                   if (now - lastDecodeErrorAt > 3500) {
                     lastDecodeErrorAt = now;
-                    setStatus("camera active - keep barcode horizontal inside frame", "");
+                    setStatus("camera active - center code inside frame and hold steady", "");
                   }
                 }
               );
 
               ensureInlineVideoPlayback();
               active = true;
-              setStatus("auto barcode detection active", "ok");
+              updateStartButtonState();
+              setStatus(`camera scanner active (${Date.now() - startRequestedAt}ms)`, "ok");
               return;
             } catch (err) {
               startError = err;
@@ -797,6 +870,9 @@
           console.error("Scanner start failed:", err);
           const errorText = err && err.message ? err.message : "camera unavailable/blocked";
           setStatus(`${errorText}. allow permission or use manual input`, "bad");
+        } finally {
+          startingScanner = false;
+          updateStartButtonState();
         }
       }
 
@@ -815,6 +891,18 @@
       });
 
       loginBtnEl.addEventListener("click", loginOperator);
+      startCameraBtnEl.addEventListener(
+        "pointerdown",
+        () => {
+          if (!authToken || active || startingScanner) return;
+          void primeCameraPermissionAndCache();
+        },
+        { passive: true }
+      );
+      startCameraBtnEl.addEventListener("click", async () => {
+        await primeAudioContext();
+        await startScanner();
+      });
       loginPasswordEl.addEventListener("keydown", (event) => {
         if (event.key === "Enter") {
           void loginOperator();
@@ -838,7 +926,8 @@
         }
         setLoginState(true);
         await syncOfflineQueue();
-        await startScanner();
+        setStatus("session restored. tap Start Camera to open scanner", "");
+        updateStartButtonState();
       });
     </script>
   </body>
