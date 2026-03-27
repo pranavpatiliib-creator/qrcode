@@ -3,6 +3,7 @@
  */
 const express = require("express");
 const Scan = require("../models/Scan");
+const { DUPLICATE_ERROR_CODE } = require("../models/Scan");
 const { requireAuth } = require("../middleware/requireAuth");
 const { validateScanBody } = require("../middleware/validateScan");
 
@@ -16,19 +17,18 @@ router.post("/scan", requireAuth, validateScanBody, async (req, res, next) => {
   try {
     const { studentId, source } = req.validatedScan;
 
-    await Scan.create({ studentId, source });
+    const scan = await Scan.create({ studentId, source });
 
     return res.status(201).json({
       status: "success",
       message: "allowed",
       data: {
         id: studentId,
-        scannedAt: new Date().toISOString()
+        scannedAt: scan.scannedAt
       }
     });
   } catch (err) {
-    // Mongo duplicate key error code for unique index violations.
-    if (err && err.code === 11000) {
+    if (err && err.code === DUPLICATE_ERROR_CODE) {
       return res.status(200).json({
         status: "success",
         message: "already taken",

@@ -5,7 +5,7 @@ const dotenv = require("dotenv");
 
 dotenv.config();
 
-const required = ["MONGODB_URI", "PORT"];
+const required = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "PORT"];
 
 for (const key of required) {
   if (!process.env[key]) {
@@ -31,7 +31,9 @@ const allowedStudentIds = (process.env.ALLOWED_STUDENT_IDS || "")
 const env = {
   NODE_ENV: process.env.NODE_ENV || "development",
   PORT: Number(process.env.PORT || 8080),
-  MONGODB_URI: process.env.MONGODB_URI,
+  SUPABASE_URL: process.env.SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
+  SUPABASE_SCANS_TABLE: process.env.SUPABASE_SCANS_TABLE || "scans",
   ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS || "",
   AUTH_USER_ID: process.env.AUTH_USER_ID || "safe",
   AUTH_PASSWORD: process.env.AUTH_PASSWORD || "safe@123",
